@@ -1,0 +1,207 @@
+import requests
+import pandas as pd
+from io import StringIO
+from datetime import datetime, timedelta
+import time
+import html
+
+# ========== Настройки ==========
+CLIENT_ID = "1653402"
+API_KEY = "12f1d60d-599c-488f-a2f2-e4c62b618715"
+HEADERS = {
+    "Client-Id": CLIENT_ID,
+    "Api-Key": API_KEY,
+    "Content-Type": "application/json"
+}
+
+TELEGRAM_BOT_TOKEN = "8266257254:AAGMl9dhAJOYkmOiyuRB1Z1ftHmp4L7kDwA"
+TELEGRAM_CHAT_ID = "-1002925992178"
+
+# ========== Цены и сопоставления ==========
+COST_PER_UNIT = {
+    "Ч-стекло бежевый": 82, "Ч-стекло розовый": 82,
+    "Б-стекло розовый": 62, "Б-стекло бежевый": 62,
+    "Б-стекло серый": 62, "Ч-стекло серый": 82,
+    "Ч-стекло синий": 82, "Б-стекло синий": 62,
+    "Б-стекло белый": 62, "Ч-стекло белый": 82,
+    "Ч-циркон мультиколор": 197, "Ч-циркон желтый": 197,
+    "Ч-гранат": 192, "Ч-турмалин разноцветный": 207,
+    "Ч-хризопраз зеленый": 82, "Б-циркон мультиколор": 122,
+    "Б-циркон желтый": 122, "Б-гранат": 92,
+    "Б-турмалин разноцветный": 112, "Б-хризопраз зеленый": 62,
+    "Ч-стекло зеленый": 82, "Б-стекло зеленый": 62,
+    "Б-стекло ярко-синий": 62, "Ч-стекло ярко-синий": 82,
+    "Б-черная шпинель": 62, "Ч-черная шпинель": 82,
+    "Ч-майорка": 107
+}
+
+ARTICLE_SKU_MAP = {
+    "Ч-стекло бежевый": 1398656980, "Ч-стекло розовый": 1398734906,
+    "Б-стекло розовый": 1398858209, "Б-стекло бежевый": 1398874577,
+    "Б-стекло серый": 1469625290, "Ч-стекло серый": 1469696965,
+    "Ч-стекло синий": 1469718985, "Б-стекло синий": 1469742088,
+    "Б-стекло белый": 1469762419, "Ч-стекло белый": 1469767310,
+    "Ч-циркон мультиколор": 1610548211, "Ч-циркон желтый": 1610566271,
+    "Ч-гранат": 1610580380, "Ч-турмалин разноцветный": 1610597425,
+    "Ч-хризопраз зеленый": 1610647254, "Б-циркон мультиколор": 1610836706,
+    "Б-циркон желтый": 1610850272, "Б-гранат": 1610876456,
+    "Б-турмалин разноцветный": 1611024636, "Б-хризопраз зеленый": 1611198277,
+    "Ч-стекло зеленый": 1874983173, "Б-стекло зеленый": 1874997019,
+    "Б-стекло ярко-синий": 1905088221, "Ч-стекло ярко-синий": 1905104585,
+    "Б-черная шпинель": 1905127879, "Ч-черная шпинель": 1905140709,
+    "Ч-майорка": 1944503998
+}
+
+# ========== Утилиты ==========
+def chunks(lst, n):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+def escape(text):
+    return html.escape(str(text))
+
+# ========== Даты ==========
+today = datetime.now()
+yesterday = today - timedelta(days=1)
+two_months_ago = today - timedelta(days=62)
+
+processed_at_from = two_months_ago.strftime("%Y-%m-%dT00:00:00.000Z")
+processed_at_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
+yesterday_from = yesterday.strftime("%Y-%m-%dT00:00:00.000Z")
+yesterday_to = yesterday.strftime("%Y-%m-%dT23:59:59.999Z")
+
+# ========== Создание отчёта ==========
+create_url = "https://api-seller.ozon.ru/v1/report/postings/create"
+create_payload = {
+    "filter": {
+        "processed_at_from": processed_at_from,
+        "processed_at_to": processed_at_to,
+        "delivery_schema": ["fbo"],
+        "sku": []
+    },
+    "language": "DEFAULT"
+}
+create_resp = requests.post(create_url, json=create_payload, headers=HEADERS)
+create_resp.raise_for_status()
+code = create_resp.json().get("result", {}).get("code")
+if not code:
+    raise SystemExit("Не удалось получить code при создании отчёта")
+
+info_url = "https://api-seller.ozon.ru/v1/report/info"
+file_url = None
+for _ in range(20):
+    info_resp = requests.post(info_url, json={"code": code}, headers=HEADERS)
+    info_resp.raise_for_status()
+    info_result = info_resp.json().get("result", {})
+    if info_result.get("status") == "success":
+        file_url = info_result.get("file")
+        break
+    time.sleep(5)
+if not file_url:
+    raise SystemExit("Отчёт не был готов после всех попыток")
+
+# ========== Чтение CSV ==========
+csv_text = requests.get(file_url).text
+df = pd.read_csv(StringIO(csv_text), sep=';')
+df["Дата доставки"] = pd.to_datetime(df.get("Дата доставки"), errors='coerce')
+# ========== Анализ доставок ==========
+deliveries = df[df["Дата доставки"].dt.date == yesterday.date()]
+article_counts = deliveries.groupby("Артикул")["Количество"].sum() if not deliveries.empty else pd.Series(dtype=int)
+
+total_cost = sum(COST_PER_UNIT.get(article, 0) * qty for article, qty in article_counts.items())
+
+# ========== Остатки ==========
+stock_url = "https://api-seller.ozon.ru/v2/analytics/stock_on_warehouses"
+stock_resp = requests.post(stock_url, json={"limit": 1000, "offset": 0, "warehouse_type": "ALL"}, headers=HEADERS)
+stock_resp.raise_for_status()
+stock_rows = stock_resp.json().get("result", {}).get("rows", [])
+
+stock_totals, promised_totals = {}, {}
+for r in stock_rows:
+    sku = r.get("sku")
+    if sku is None:
+        continue
+    stock_totals[sku] = stock_totals.get(sku, 0) + (r.get("free_to_sell_amount") or 0)
+    promised_totals[sku] = promised_totals.get(sku, 0) + (r.get("promised_amount") or 0)
+
+# ========== Turnover/stocks ==========
+turnover_url = "https://api-seller.ozon.ru/v1/analytics/turnover/stocks"
+needed_skus = [ARTICLE_SKU_MAP[art] for art in article_counts.index if art in ARTICLE_SKU_MAP]
+ads_by_sku, idc_by_sku = {}, {}
+for chunk in chunks(needed_skus, 50):
+    r = requests.post(turnover_url, json={"limit": len(chunk), "offset": 0, "sku": chunk}, headers=HEADERS)
+    r.raise_for_status()
+    for it in (r.json().get("items") or r.json().get("result", {}).get("items") or []):
+        sku = it.get("sku")
+        if sku is None:
+            continue
+        ads_by_sku[sku] = it.get("ads", 0) or 0
+        idc_by_sku[sku] = it.get("idc", 0) or 0
+    time.sleep(0.2)
+
+# ========== Финансовые транзакции ==========
+transaction_url = "https://api-seller.ozon.ru/v3/finance/transaction/totals"
+trans_resp = requests.post(transaction_url, json={"date": {"from": yesterday_from, "to": yesterday_to}, "posting_number": "", "transaction_type": "all"}, headers=HEADERS)
+trans_resp.raise_for_status()
+transaction_data = trans_resp.json().get("result", {})
+
+table_data = {
+    "продажи и возвраты": transaction_data.get("accruals_for_sale", 0) or 0,
+    "комиссия Озон": transaction_data.get("sale_commission", 0) or 0,
+    "доставка": transaction_data.get("processing_and_delivery", 0) or 0,
+    "возвраты и отмены": transaction_data.get("refunds_and_cancellations", 0) or 0,
+    "услуги/реклама": transaction_data.get("services_amount", 0) or 0,
+    "компенсации": transaction_data.get("compensation_amount", 0) or 0,
+    "доставка по выбору продавца": transaction_data.get("money_transfer", 0) or 0,
+    "доп услуги": transaction_data.get("others_amount", 0) or 0,
+    "себестоимость товаров": -total_cost
+}
+
+net_profit = (
+    table_data["продажи и возвраты"]
+    + table_data["комиссия Озон"]
+    + table_data["доставка"]
+    + table_data["возвраты и отмены"]
+    + table_data["услуги/реклама"]
+    + table_data["компенсации"]
+    + table_data["доставка по выбору продавца"]
+    + table_data["доп услуги"]
+    + table_data["себестоимость товаров"]
+)
+total_income = sum(v for k, v in table_data.items() if k != "себестоимость товаров")
+margin_percent = (net_profit / total_income) * 100 if total_income else 0
+table_data["итоговая маржа"] = f"{net_profit:.2f} ({margin_percent:.2f}%)"
+
+# ========== Формирование сообщения ==========
+lines = [f"<b>Финансовые итоги за {yesterday.strftime('%d.%m.%Y')}</b>", "", "<u>🛒 Количество доставленных товаров по артикулам:</u>"]
+items = []
+for article, qty in article_counts.items():
+    sku = ARTICLE_SKU_MAP.get(article)
+    if sku is None:
+        items.append({"article": article, "qty": int(qty), "sku": None, "idc": float('inf'), "free": 0, "promised": 0, "ads": 0, "missing_sku": True})
+        continue
+    items.append({"article": article, "qty": int(qty), "sku": sku, "idc": idc_by_sku.get(sku, float('inf')), "free": stock_totals.get(sku, 0), "promised": promised_totals.get(sku, 0), "ads": ads_by_sku.get(sku, 0), "missing_sku": False})
+items.sort(key=lambda x: x["idc"] if x["idc"] is not None else float('inf'))
+for it in items:
+    if it["missing_sku"]:
+        lines.append(f"💎 {escape(it['article'])}: {it['qty']} (маркировка SKU не найдена)")
+    else:
+        lines.append(f"💎 {escape(it['article'])}: {it['qty']} (<b>{int(it['idc'])} дней до 0</b>; остатки: {int(it['free'])}; в пути: {int(it['promised'])}; продажи: {it['ads']:.2f})")
+
+lines.append("")
+lines.append("<u>📊 Финансовый результат:</u>")
+base = table_data.get("продажи и возвраты", 0) or 1
+for key, val in table_data.items():
+    if key == "итоговая маржа":
+        lines.append(f"📈 {escape(key)}: {escape(val)}")
+    else:
+        emoji = "🟢" if val > 0 else "🔴"
+        percent = (val / base) * 100
+        lines.append(f"{emoji} {escape(key)}:\n{val:.2f} ({percent:.2f}%)")
+
+output_text = "\n".join(lines)
+
+# ========== Отправка в Telegram ==========
+send_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+resp = requests.post(send_url, params={"chat_id": TELEGRAM_CHAT_ID, "text": output_text, "parse_mode": "HTML"})
+print("Сообщение успешно отправлено в Telegram" if resp.status_code == 200 else f"Ошибка при отправке в Telegram: {resp.status_code} {resp.text}")
