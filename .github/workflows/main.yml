@@ -1,0 +1,24 @@
+name: Run tg_sender
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * *"  # 08:00 МСК каждый день
+
+jobs:
+  run_python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        run: |
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Run tg_sender script
+        run: python ./tg_sender
